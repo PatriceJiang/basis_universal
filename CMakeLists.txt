@@ -123,8 +123,7 @@ else()
 	endif()
 endif()
 
-set(BASISU_SRC_LIST ${COMMON_SRC_LIST} 
-	basisu_tool.cpp
+set(BASISU_LIB_SRC_LIST ${COMMON_SRC_LIST}
 	encoder/basisu_backend.cpp
 	encoder/basisu_basis_file.cpp
 	encoder/basisu_comp.cpp
@@ -143,10 +142,18 @@ set(BASISU_SRC_LIST ${COMMON_SRC_LIST}
 	encoder/basisu_opencl.cpp
 	encoder/pvpngreader.cpp
 	transcoder/basisu_transcoder.cpp
+)
+
+set(BASISU_SRC_LIST ${BASISU_LIB_SRC_LIST} 
+	basisu_tool.cpp
 	)
 
 if (ZSTD)
 	set(BASISU_SRC_LIST ${BASISU_SRC_LIST} zstd/zstd.c)
+endif()
+
+if (ZSTD)
+	set(BASISU_LIB_SRC_LIST ${BASISU_LIB_SRC_LIST} zstd/zstd.c)
 endif()
 
 if (APPLE)
@@ -159,10 +166,20 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/${BIN_DIRECTORY})
 
 add_executable(basisu ${BASISU_SRC_LIST})
 
+add_executable(hyperpix 
+	hyperpix_tool.cpp
+	${BASISU_LIB_SRC_LIST}
+)
+set_target_properties(hyperpix PROPERTIES
+	CXX_STANDARD 20
+)
+
 if (ZSTD)
 	target_compile_definitions(basisu PRIVATE BASISD_SUPPORT_KTX2_ZSTD=1)
+	target_compile_definitions(hyperpix PRIVATE BASISD_SUPPORT_KTX2_ZSTD=1)
 else()
 	target_compile_definitions(basisu PRIVATE BASISD_SUPPORT_KTX2_ZSTD=0)
+	target_compile_definitions(hyperpix PRIVATE BASISD_SUPPORT_KTX2_ZSTD=0)
 endif()
 
 if (NOT MSVC)
@@ -172,6 +189,7 @@ if (NOT MSVC)
 		set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -DBASISU_SUPPORT_OPENCL=1")	
 		
 		target_include_directories( basisu PRIVATE ${OpenCL_INCLUDE_DIRS} )
+		target_include_directories( hyperpix PRIVATE ${OpenCL_INCLUDE_DIRS} )
 		set(BASISU_EXTRA_LIBS ${OpenCL_LIBRARIES})
 	endif()
 
@@ -194,6 +212,7 @@ endif()
 
 if (NOT MSVC)
    target_link_libraries(basisu m pthread ${BASISU_EXTRA_LIBS})
+   target_link_libraries(hyperpix m pthread ${BASISU_EXTRA_LIBS})
 endif()
 
 if (NOT EMSCRIPTEN)
@@ -208,4 +227,12 @@ if (NOT EMSCRIPTEN)
 			endif()
 		endif()
 	endif()
+
+	if(DEFINED ENV{XCODE_SIGN})
+		add_custom_command(TARGET hyperpix POST_BUILD
+			COMMAND codesign --force --timestamp --options runtime
+			ARGS --sign $ENV{XCODE_SIGN} $<TARGET_FILE:hyperpix>
+		)
+	endif()
+
 endif()
