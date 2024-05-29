@@ -10,11 +10,15 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <thread>
 #include "encoder/basisu_comp.h"
 #include "encoder/basisu_enc.h"
+#include "transcoder/basisu_transcoder_uastc.h"
 
 #include <libgen.h>
+
+#define SIGNATURE "HYPERPIX"
 
 constexpr int SIGNATURE_LEN = 8;
 constexpr int FLAGS_LEN = 8;
@@ -54,7 +58,7 @@ void writeFile(const char *dst, const void *data, size_t dataLen, bool hasAlpha,
     }
     auto *cptr = reinterpret_cast<char *>(ptr);
     if constexpr (FLAGS_LEN + SIGNATURE_LEN > 0) {
-        memcpy(ptr, "HYPERPIX", SIGNATURE_LEN);
+        memcpy(ptr, SIGNATURE, SIGNATURE_LEN);
         memcpy(cptr + SIGNATURE_LEN, &flags, FLAGS_LEN);
     }
     memcpy(cptr + SIGNATURE_LEN + FLAGS_LEN, data, dataLen);
@@ -117,7 +121,7 @@ int main(int argc, char **argv) {
         }
         if (S_ISREG(st.st_mode)) {
             printf("[log] 处理单一文件<%s>...\n", argv[arg]);
-            convertFile(argv[arg], "test.basis", &pool);
+            convertFile(argv[arg], argv[arg], &pool);
         } else if (S_ISDIR(st.st_mode)) {
             printf("[log] 查找目录<%s>中的图片...\n", argv[arg]);
             std::vector<std::string> files;
@@ -130,7 +134,7 @@ int main(int argc, char **argv) {
                 std::vector<char> name(f.c_str(), f.c_str() + f.size());
                 printProgress(i * 1.0F / files.size(), basename(name.data()), seconds);
                 // printf("  %s\n", f.c_str());
-                convertFile(f, "test.basis", &pool);
+                convertFile(f, f, &pool);
                 auto end = std::chrono::high_resolution_clock::now();
                 auto ms = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
                 seconds = ms * (files.size() - i) * 0.000000001 / i;
@@ -145,6 +149,32 @@ int main(int argc, char **argv) {
 }
 
 bool convertFile(const std::string &file, const std::string &output, basisu::job_pool *pool) {
+    int fd = open(file.c_str(), O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "[error] failed to open file image <%s>!\n", file.c_str());
+        return false;
+    }
+    struct stat st;
+    fstat(fd, &st);
+    if (st.st_size < 16) {
+        fprintf(stderr, "[error] file <%s> too small!\n", file.c_str());
+        close(fd);
+        return false;
+    }
+    char header[16];
+    auto readn = read(fd, header, 16);
+    if (readn < 16) {
+        fprintf(stderr, "[error] failed to read header <%s>\n", file.c_str());
+        close(fd);
+        return false;
+    }
+    if (memcmp(header, SIGNATURE, SIGNATURE_LEN) == 0) {
+        printf("\n[log] skip file %s\n", file.c_str());
+        close(fd);
+        return false;
+    }
+    close(fd);
+
     basisu::basis_compressor_params params;
     basisu::basis_compressor compressor;
 
