@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -14,7 +15,9 @@
 #include <thread>
 #include "encoder/basisu_comp.h"
 #include "encoder/basisu_enc.h"
+#include "encoder/basisu_frontend.h"
 #include "transcoder/basisu_transcoder_uastc.h"
+#include "zstd/zstd.h"
 
 #include <libgen.h>
 
@@ -23,6 +26,9 @@
 constexpr int SIGNATURE_LEN = 8;
 constexpr int FLAGS_LEN = 8;
 constexpr int VERSION = 0x01;
+
+static int64_t fileSize0 = 0;
+static int64_t fileSize1 = 0;
 
 enum HyperPixQuality {
     HPQ_BEST = 0,
@@ -36,9 +42,17 @@ struct HyperPixFlags {
     uint8_t version = VERSION;
     uint8_t quality = HPQ_HIGH;
     uint8_t hasAlpha = 0;
-    uint8_t reserved = 0;
-    uint32_t reservedI = 0;
+    uint8_t reserved[5] = {0};
 };
+
+std::vector<uint8_t> compressFile(const void *data, size_t dataLen) {
+    const int compressLevel = ZSTD_maxCLevel();
+    auto capacity = ZSTD_compressBound(dataLen);
+    std::vector<uint8_t> output(capacity);
+    size_t compressedLen = ZSTD_compress(output.data(), capacity, data, dataLen, compressLevel);
+    output.resize(compressedLen);
+    return output;
+}
 
 void writeFile(const char *dst, const void *data, size_t dataLen, bool hasAlpha, HyperPixQuality quality = HPQ_DEFAULT) {
     int fd = open(dst, O_RDWR | O_CREAT | O_TRUNC, 0664);
@@ -145,6 +159,12 @@ int main(int argc, char **argv) {
         }
     }
 
+    printf(" 文件大小变化：%lld -> %lld\n", fileSize0, fileSize1);
+    if (fileSize0 > 0) {
+        auto diff = 100.0 * (fileSize1 - fileSize0) / fileSize0;
+        printf("   %s : %.2lf %%\n", diff > 0 ? "膨胀" : "减少", diff);
+    }
+
     return EXIT_SUCCESS;
 }
 
@@ -184,10 +204,17 @@ bool convertFile(const std::string &file, const std::string &output, basisu::job
         return EXIT_FAILURE;
     }
 
+    fileSize0 += st.st_size;
+
+    params.m_compression_level = basisu::BASISU_MAX_COMPRESSION_LEVEL;
     params.m_create_ktx2_file = false;
     params.m_uastc = true;
+    params.m_quality_level = 120;
     params.m_pJob_pool = pool;
     params.m_status_output = false;
+    params.m_use_opencl = true;
+    params.m_no_selector_rdo = true;
+    params.m_mip_gen = false;
     // params.m_read_source_images = true;
     params.m_source_images.push_back(srcImage);
 
@@ -198,6 +225,12 @@ bool convertFile(const std::string &file, const std::string &output, basisu::job
         return false;
     }
     const auto &basisFile = compressor.get_output_basis_file();
-    writeFile(output.c_str(), basisFile.data(), basisFile.size(), srcImage.has_alpha());
+
+    auto compressedData = compressFile(basisFile.data(), basisFile.size());
+
+    writeFile(output.c_str(), compressedData.data(), compressedData.size(), srcImage.has_alpha());
+
+    fileSize1 += (compressedData.size() + SIGNATURE_LEN + FLAGS_LEN);
+
     return true;
 }

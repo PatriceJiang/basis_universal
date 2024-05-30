@@ -232,6 +232,8 @@ if (NOT EMSCRIPTEN)
 		add_custom_command(TARGET hyperpix POST_BUILD
 			COMMAND codesign --force --timestamp --options runtime
 			ARGS --sign $ENV{XCODE_SIGN} $<TARGET_FILE:hyperpix>
+			COMMAND llvm-strip $<TARGET_FILE:hyperpix>
+			COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:hyperpix> ~/app/bin
 		)
 	endif()
 
