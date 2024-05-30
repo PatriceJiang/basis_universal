@@ -29,6 +29,8 @@ constexpr int VERSION = 0x01;
 
 static int64_t fileSize0 = 0;
 static int64_t fileSize1 = 0;
+static int32_t skipFiles = 0;
+static int32_t errorFiles = 0;
 
 enum HyperPixQuality {
     HPQ_BEST = 0,
@@ -154,15 +156,21 @@ int main(int argc, char **argv) {
                 seconds = ms * (files.size() - i) * 0.000000001 / i;
             }
             printf("\r\033[K 转码完成. 共 %d 个图片\n", static_cast<int>(files.size()));
+            if(skipFiles) {
+                printf("  忽略 %d 个图片\n", skipFiles);
+            }
+            if(errorFiles) {
+                printf("  错误图片: %d\n", errorFiles);
+            }
         } else {
             fprintf(stderr, "[error] unknown file type <%s>!\n", argv[arg]);
         }
     }
 
-    printf(" 文件大小变化：%lld -> %lld\n", fileSize0, fileSize1);
-    if (fileSize0 > 0) {
+    if (fileSize1 > 0) {
+        printf("   文件大小变化：%lld -> %lld\n", fileSize0, fileSize1);
         auto diff = 100.0 * (fileSize1 - fileSize0) / fileSize0;
-        printf("   %s : %.2lf %%\n", diff > 0 ? "膨胀" : "减少", diff);
+        printf("      %s : %.2lf %%\n", diff > 0 ? "膨胀" : "减少", diff);
     }
 
     return EXIT_SUCCESS;
@@ -172,6 +180,7 @@ bool convertFile(const std::string &file, const std::string &output, basisu::job
     int fd = open(file.c_str(), O_RDONLY);
     if (fd < 0) {
         fprintf(stderr, "[error] failed to open file image <%s>!\n", file.c_str());
+        errorFiles ++;
         return false;
     }
     struct stat st;
@@ -179,6 +188,7 @@ bool convertFile(const std::string &file, const std::string &output, basisu::job
     if (st.st_size < 16) {
         fprintf(stderr, "[error] file <%s> too small!\n", file.c_str());
         close(fd);
+        errorFiles ++;
         return false;
     }
     char header[16];
@@ -186,11 +196,13 @@ bool convertFile(const std::string &file, const std::string &output, basisu::job
     if (readn < 16) {
         fprintf(stderr, "[error] failed to read header <%s>\n", file.c_str());
         close(fd);
+        errorFiles ++;
         return false;
     }
     if (memcmp(header, SIGNATURE, SIGNATURE_LEN) == 0) {
-        printf("\n[log] skip file %s\n", file.c_str());
+        // printf("\n[log] skip file %s\n", file.c_str());
         close(fd);
+        skipFiles ++;
         return false;
     }
     close(fd);
@@ -201,20 +213,21 @@ bool convertFile(const std::string &file, const std::string &output, basisu::job
     basisu::image srcImage;
     if (!basisu::load_image(file, srcImage)) {
         fprintf(stderr, "[error] failed to load image <%s>!\n", file.c_str());
+        errorFiles ++;
         return EXIT_FAILURE;
     }
 
     fileSize0 += st.st_size;
 
-    params.m_compression_level = basisu::BASISU_MAX_COMPRESSION_LEVEL;
+    // params.m_compression_level = basisu::BASISU_MAX_COMPRESSION_LEVEL;
     params.m_create_ktx2_file = false;
     params.m_uastc = true;
-    params.m_quality_level = 120;
+    // params.m_quality_level = 120;
     params.m_pJob_pool = pool;
     params.m_status_output = false;
-    params.m_use_opencl = true;
-    params.m_no_selector_rdo = true;
-    params.m_mip_gen = false;
+    // params.m_use_opencl = true;
+    // params.m_no_selector_rdo = true;
+    // params.m_mip_gen = false;
     // params.m_read_source_images = true;
     params.m_source_images.push_back(srcImage);
 
@@ -222,6 +235,7 @@ bool convertFile(const std::string &file, const std::string &output, basisu::job
     auto code = compressor.process();
     if (code != basisu::basis_compressor::error_code::cECSuccess) {
         fprintf(stderr, "[error] failed to encode image <%s>!\n", file.c_str());
+        errorFiles ++;
         return false;
     }
     const auto &basisFile = compressor.get_output_basis_file();
