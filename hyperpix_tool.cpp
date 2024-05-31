@@ -8,29 +8,36 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <future>
+#include <latch>
+#include <mutex>
+#include <ratio>
 #include <thread>
 #include "encoder/basisu_comp.h"
 #include "encoder/basisu_enc.h"
 #include "encoder/basisu_frontend.h"
+#include "transcoder/basisu_transcoder_internal.h"
 #include "transcoder/basisu_transcoder_uastc.h"
 #include "zstd/zstd.h"
 
 #include <libgen.h>
+#include <atomic>
 
 #define SIGNATURE "HYPERPIX"
 
-constexpr int SIGNATURE_LEN = 8;
-constexpr int FLAGS_LEN = 8;
-constexpr int VERSION = 0x01;
+#define SIGNATURE_LEN 8
+#define FLAGS_LEN     8
+#define VERSION       0x01
 
-static int64_t fileSize0 = 0;
-static int64_t fileSize1 = 0;
-static int32_t skipFiles = 0;
-static int32_t errorFiles = 0;
+static std::atomic_int64_t fileSize0 = 0;
+static std::atomic_int64_t fileSize1 = 0;
+static std::atomic_int32_t skipFiles = 0;
+static std::atomic_int32_t errorFiles = 0;
 
 enum HyperPixQuality {
     HPQ_BEST = 0,
@@ -49,10 +56,19 @@ struct HyperPixFlags {
 
 std::vector<uint8_t> compressFile(const void *data, size_t dataLen) {
     const int compressLevel = ZSTD_maxCLevel();
+#if 0
     auto capacity = ZSTD_compressBound(dataLen);
     std::vector<uint8_t> output(capacity);
     size_t compressedLen = ZSTD_compress(output.data(), capacity, data, dataLen, compressLevel);
     output.resize(compressedLen);
+#else
+    auto *ctx = ZSTD_createCCtx();
+    auto capacity = ZSTD_compressBound(dataLen);
+    std::vector<uint8_t> output(capacity);
+    auto compressedLen = ZSTD_compressCCtx(ctx, output.data(), output.size(), data, dataLen, compressLevel);
+    output.resize(compressedLen);
+    ZSTD_freeCCtx(ctx);
+#endif
     return output;
 }
 
@@ -103,7 +119,7 @@ static void collectPngFiles(const std::string &dirname, std::vector<std::string>
     closedir(dir);
 }
 
-static void printProgress(float precent, const char *tag, float seconds) {
+static void printProgress(float precent, int a, int b) {
     printf("\r\033[K 转码中 [");
     int l = static_cast<int>(precent * 30);
     int r = 30 - l;
@@ -113,11 +129,11 @@ static void printProgress(float precent, const char *tag, float seconds) {
         else
             putc(' ', stdout);
     }
-    printf("] %.2f%%, 剩余: %.2f s  >> %s <<", precent * 100, (seconds < 0 ? 0 : seconds), tag);
+    printf("] %.2f%%  >> %d/%d <<", precent * 100, a, b);
     fflush(stdout);
 }
 
-bool convertFile(const std::string &file, const std::string &output, basisu::job_pool *pool);
+bool convertFile(const std::string &file, const std::string &output, std::atomic_bool &);
 
 int main(int argc, char **argv) {
     if (argc < 2) {
@@ -126,8 +142,9 @@ int main(int argc, char **argv) {
     }
 
     basisu::basisu_encoder_init();
-
     basisu::job_pool pool(std::thread::hardware_concurrency());
+
+    std::atomic_bool openCLFailed = false;
 
     for (int arg = 1; arg < argc; arg++) {
         struct stat st;
@@ -137,50 +154,55 @@ int main(int argc, char **argv) {
         }
         if (S_ISREG(st.st_mode)) {
             printf("[log] 处理单一文件<%s>...\n", argv[arg]);
-            convertFile(argv[arg], argv[arg], &pool);
+            convertFile(argv[arg], argv[arg], openCLFailed);
         } else if (S_ISDIR(st.st_mode)) {
             printf("[log] 查找目录<%s>中的图片...\n", argv[arg]);
             std::vector<std::string> files;
             collectPngFiles(argv[arg], files);
-            int i = 0;
-            float seconds = -1;
-            auto start = std::chrono::high_resolution_clock::now();
+            std::atomic_int32_t i = 0;
+            std::mutex mtx;
+            std::latch lat(files.size());
+            auto total = files.size();
+            
             for (auto &f : files) {
-                i++;
-                std::vector<char> name(f.c_str(), f.c_str() + f.size());
-                printProgress(i * 1.0F / files.size(), basename(name.data()), seconds);
-                // printf("  %s\n", f.c_str());
-                convertFile(f, f, &pool);
-                auto end = std::chrono::high_resolution_clock::now();
-                auto ms = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
-                seconds = ms * (files.size() - i) * 0.000000001 / i;
+                pool.add_job([ff = f, &i, &openCLFailed, &mtx, &lat, total]() {
+                    i++;
+                    convertFile(ff, ff, openCLFailed);
+                    lat.count_down();
+                });
+            }
+            while (!lat.try_wait()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                printProgress(i * 1.0F / total, i.load(), total);
             }
             printf("\r\033[K 转码完成. 共 %d 个图片\n", static_cast<int>(files.size()));
-            if(skipFiles) {
-                printf("  忽略 %d 个图片\n", skipFiles);
+            if (skipFiles) {
+                printf("  忽略 %d 个图片\n", skipFiles.load(std::memory_order_acquire));
             }
-            if(errorFiles) {
-                printf("  错误图片: %d\n", errorFiles);
+            if (errorFiles) {
+                printf("  错误图片: %d\n", errorFiles.load(std::memory_order_acquire));
             }
         } else {
             fprintf(stderr, "[error] unknown file type <%s>!\n", argv[arg]);
         }
     }
 
+    pool.wait_for_all();
+
     if (fileSize1 > 0) {
-        printf("   文件大小变化：%lld -> %lld\n", fileSize0, fileSize1);
-        auto diff = 100.0 * (fileSize1 - fileSize0) / fileSize0;
+        printf("   文件大小变化：%lld -> %lld\n", fileSize0.load(), fileSize1.load());
+        auto diff = 100.0 * (fileSize1.load() - fileSize0.load()) / fileSize0.load();
         printf("      %s : %.2lf %%\n", diff > 0 ? "膨胀" : "减少", diff);
     }
 
     return EXIT_SUCCESS;
 }
 
-bool convertFile(const std::string &file, const std::string &output, basisu::job_pool *pool) {
+bool convertFile(const std::string &file, const std::string &output, std::atomic_bool &openCLFailed) {
     int fd = open(file.c_str(), O_RDONLY);
     if (fd < 0) {
         fprintf(stderr, "[error] failed to open file image <%s>!\n", file.c_str());
-        errorFiles ++;
+        errorFiles++;
         return false;
     }
     struct stat st;
@@ -188,7 +210,7 @@ bool convertFile(const std::string &file, const std::string &output, basisu::job
     if (st.st_size < 16) {
         fprintf(stderr, "[error] file <%s> too small!\n", file.c_str());
         close(fd);
-        errorFiles ++;
+        errorFiles++;
         return false;
     }
     char header[16];
@@ -196,13 +218,13 @@ bool convertFile(const std::string &file, const std::string &output, basisu::job
     if (readn < 16) {
         fprintf(stderr, "[error] failed to read header <%s>\n", file.c_str());
         close(fd);
-        errorFiles ++;
+        errorFiles++;
         return false;
     }
     if (memcmp(header, SIGNATURE, SIGNATURE_LEN) == 0) {
         // printf("\n[log] skip file %s\n", file.c_str());
         close(fd);
-        skipFiles ++;
+        skipFiles++;
         return false;
     }
     close(fd);
@@ -213,17 +235,19 @@ bool convertFile(const std::string &file, const std::string &output, basisu::job
     basisu::image srcImage;
     if (!basisu::load_image(file, srcImage)) {
         fprintf(stderr, "[error] failed to load image <%s>!\n", file.c_str());
-        errorFiles ++;
+        errorFiles++;
         return EXIT_FAILURE;
     }
 
     fileSize0 += st.st_size;
 
-    // params.m_compression_level = basisu::BASISU_MAX_COMPRESSION_LEVEL;
+    basisu::job_pool lpool(1);
+
+    params.m_compression_level = basisu::BASISU_MAX_COMPRESSION_LEVEL;
     params.m_create_ktx2_file = false;
     params.m_uastc = true;
     // params.m_quality_level = 120;
-    params.m_pJob_pool = pool;
+    params.m_pJob_pool = &lpool;
     params.m_status_output = false;
     // params.m_use_opencl = true;
     // params.m_no_selector_rdo = true;
@@ -231,20 +255,36 @@ bool convertFile(const std::string &file, const std::string &output, basisu::job
     // params.m_read_source_images = true;
     params.m_source_images.push_back(srcImage);
 
+    if(openCLFailed.load(std::memory_order_acquire)) {
+        params.m_use_opencl = false;
+    } else {
+        params.m_use_opencl = true;
+    }
+    
     compressor.init(params);
+
+    if(compressor.get_opencl_failed()){
+        openCLFailed.store(true, std::memory_order_release); 
+    }
+
     auto code = compressor.process();
     if (code != basisu::basis_compressor::error_code::cECSuccess) {
         fprintf(stderr, "[error] failed to encode image <%s>!\n", file.c_str());
-        errorFiles ++;
+        errorFiles++;
         return false;
     }
+    lpool.wait_for_all();
+
     const auto &basisFile = compressor.get_output_basis_file();
 
+#if 1 // enable compress
     auto compressedData = compressFile(basisFile.data(), basisFile.size());
-
     writeFile(output.c_str(), compressedData.data(), compressedData.size(), srcImage.has_alpha());
-
-    fileSize1 += (compressedData.size() + SIGNATURE_LEN + FLAGS_LEN);
+    fileSize1.fetch_add(compressedData.size() + SIGNATURE_LEN + FLAGS_LEN);
+#else
+    writeFile(output.c_str(), basisFile.data(), basisFile.size(), srcImage.has_alpha());
+    fileSize1.fetch_add(basisFile.size() + SIGNATURE_LEN + FLAGS_LEN);
+#endif
 
     return true;
 }
