@@ -111,7 +111,7 @@ static void collectPngFiles(const std::string &dirname, std::vector<std::string>
         if (ent->d_type == DT_DIR) {
             collectPngFiles(filepath, output);
         } else if (ent->d_type == DT_REG) {
-            if (filepath.ends_with(".png")) {
+            if (filepath.ends_with(".png") || filepath.ends_with(".jpg") || filepath.ends_with(".jpeg")) {
                 output.emplace_back(filepath);
             }
         }
