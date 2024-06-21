@@ -174,6 +174,21 @@ set_target_properties(hyperpix PROPERTIES
 	CXX_STANDARD 20
 )
 
+
+# 获取 Git 提交信息
+find_package(Git REQUIRED)
+execute_process(
+    COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_COMMIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+target_compile_definitions(hyperpix PUBLIC
+	VERSION_STRING="0.1.1"
+	COMMIT_STRING="${GIT_COMMIT_HASH}"
+)
+
 if (ZSTD)
 	target_compile_definitions(basisu PRIVATE BASISD_SUPPORT_KTX2_ZSTD=1)
 	target_compile_definitions(hyperpix PRIVATE BASISD_SUPPORT_KTX2_ZSTD=1)
@@ -232,8 +247,9 @@ if (NOT EMSCRIPTEN)
 		add_custom_command(TARGET hyperpix POST_BUILD
 			COMMAND codesign --force --timestamp --options runtime
 			ARGS --sign $ENV{XCODE_SIGN} $<TARGET_FILE:hyperpix>
-			COMMAND llvm-strip $<TARGET_FILE:hyperpix>
 			COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:hyperpix> ~/app/bin
+			COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:hyperpix> /Users/admin/code/blockpuzzle_cocos2dx/tools/hyperpix/hyperpix
+			COMMAND llvm-strip --strip-all /Users/admin/code/blockpuzzle_cocos2dx/tools/hyperpix/hyperpix
 		)
 	endif()
 

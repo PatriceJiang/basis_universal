@@ -5,24 +5,18 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <algorithm>
 #include <chrono>
-#include <cmath>
-#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <future>
 #include <latch>
 #include <mutex>
-#include <ratio>
 #include <thread>
+#include <vector>
 #include "encoder/basisu_comp.h"
 #include "encoder/basisu_enc.h"
 #include "encoder/basisu_frontend.h"
-#include "transcoder/basisu_transcoder_internal.h"
-#include "transcoder/basisu_transcoder_uastc.h"
 #include "zstd/zstd.h"
 
 #include <libgen.h>
@@ -135,10 +129,40 @@ static void printProgress(float precent, int a, int b) {
 
 bool convertFile(const std::string &file, const std::string &output, std::atomic_bool &);
 
+#ifndef VERSION_STRING
+    #define VERSION_STRING "0.1.0"
+#endif
+#ifndef COMMIT_STRING
+    #define COMMIT_STRING "unknow commit id"
+#endif
+
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        fprintf(stderr, "[error] parameter <path> required!\n");
-        return EXIT_FAILURE;
+    int opt = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") || strcmp(argv[i], "--help")) {
+            opt = 'h';
+            break;
+        }
+    }
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-v") || strcmp(argv[i], "--version")) {
+            opt = 'v';
+            break;
+        }
+    }
+    if (argc == 1) {
+        opt = 'h';
+    }
+
+    switch (opt) {
+        case 'h':
+            printf("Usage: %s file_or_directory ... \n", argv[0]);
+            return 0;
+        case 'v':
+            printf("Version: %s\nCommit: %s\n", VERSION_STRING, COMMIT_STRING);
+            return 0;
     }
 
     basisu::basisu_encoder_init();
@@ -163,7 +187,7 @@ int main(int argc, char **argv) {
             std::mutex mtx;
             std::latch lat(files.size());
             auto total = files.size();
-            
+
             for (auto &f : files) {
                 pool.add_job([ff = f, &i, &openCLFailed, &mtx, &lat, total]() {
                     i++;
@@ -255,16 +279,16 @@ bool convertFile(const std::string &file, const std::string &output, std::atomic
     // params.m_read_source_images = true;
     params.m_source_images.push_back(srcImage);
 
-    if(openCLFailed.load(std::memory_order_acquire)) {
+    if (openCLFailed.load(std::memory_order_acquire)) {
         params.m_use_opencl = false;
     } else {
         params.m_use_opencl = true;
     }
-    
+
     compressor.init(params);
 
-    if(compressor.get_opencl_failed()){
-        openCLFailed.store(true, std::memory_order_release); 
+    if (compressor.get_opencl_failed()) {
+        openCLFailed.store(true, std::memory_order_release);
     }
 
     auto code = compressor.process();
